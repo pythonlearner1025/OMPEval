@@ -1,4 +1,4 @@
-CXXFLAGS += -O3 -std=c++11 -Wall -Wpedantic
+CXXFLAGS += -O3 -std=c++17 -Wall -Wpedantic
 
 ifdef SYSTEMROOT
     CXXFLAGS += -lpthread
