@@ -2,6 +2,16 @@
 
 OMPEval is a fast C++ hand evaluator and equity calculator for Texas Holdem poker.
 
+# Python binding instructions
+
+check linker in setup.py points to correct lib/include folders
+
+make clean && make
+cd ..  (into ur python project)
+rm -rf build
+python setup.py build_ext --inplace
+
+
 ## Hand Evaluator
 - Evaluates hands with any number of cards from 0 to 7 (with less than 5 cards any missing cards are considered the worst kicker).
 - Multiple cards are combined in Hand objects which makes the actual evaluation fast and allows caching of partial hand data.
