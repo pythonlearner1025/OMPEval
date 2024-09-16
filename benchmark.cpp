@@ -6,6 +6,8 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <random>
+
 #if OMP_BENCHMARK_3RD_PARTY
     // Include last because of all the badly named macros. I hate C programmers.
     #include "evaluators/SKPokerEval/SevenEval.h"
@@ -219,6 +221,7 @@ public:
     void run()
     {
         cout << endl;
+        /*
         if (!is_same<TEval,Omp>::value)
             test(Omp());
         sequential<false>();
@@ -226,9 +229,52 @@ public:
         if (!is_same<Hand,nullptr_t>::value)
             random2();
         sequential<true>();
+        */
+
+        // NOTE
+        // avg difference between wprollout_rng and wprollout_exhaustive: 
+        // where N = 100
+        // 0.0586612
+
+        std::vector<std::pair<std::array<int, 2>, std::array<int, 2>>> hand_combos;
+        std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> dist(0, 51);
+
+        // Generate 100 different playerHand, oppHand combos
+        for (int i = 0; i < 100; ++i) {
+            std::array<int, 2> playerHand = {dist(rng), dist(rng)};
+            std::array<int, 2> oppHand = {dist(rng), dist(rng)};
+            
+            // Ensure all cards are different
+            while (playerHand[0] == playerHand[1] || 
+                   oppHand[0] == oppHand[1] || 
+                   playerHand[0] == oppHand[0] || 
+                   playerHand[0] == oppHand[1] || 
+                   playerHand[1] == oppHand[0] || 
+                   playerHand[1] == oppHand[1]) {
+                playerHand = {dist(rng), dist(rng)};
+                oppHand = {dist(rng), dist(rng)};
+            }
+            
+            hand_combos.emplace_back(playerHand, oppHand);
+        }
+
+        double total_diff = 0.0;
+        for (size_t i = 0; i < hand_combos.size(); ++i) {
+            const auto& combo = hand_combos[i];
+            double rng_result = wprollout_rng(combo.first, combo.second);
+            double exhaustive_result = wprollout_exhaustive(combo.first, combo.second);
+            double diff =  exhaustive_result - rng_result;
+            total_diff += diff;
+            std::cout << "Iteration " << i + 1 << ": Difference = " << diff << std::endl;
+        }
+
+        double avg_diff = total_diff / 100.0;
+        std::cout << "Average difference between wprollout_rng and wprollout_exhaustive: " << avg_diff << std::endl;
     }
 
 private:
+
     // Benchmark sequential evaluation.
     template<bool tSingleSuit>
     void sequential()
@@ -351,6 +397,260 @@ private:
         cout << "   " << count << " evals  " << (1e-6 * count / t) << "M/s  " << t << "s  " << sum << endl;
     }
 
+    // wprollout eval with random hand instead of exhaustive
+    double wprollout_rng(const std::array<int, 2>& playerHand, const std::array<int, 2>& oppHand)
+    {
+        std::cout << "Entering wprollout_test()" << std::endl;
+        // preflop test
+        omp::XoroShiro128Plus rng(0);
+        omp::FastUniformIntDistribution<unsigned> rnd(4, 51);
+
+        std::cout << "Initializing opp_range" << std::endl;
+        std::array<double, 1326> opp_range;
+
+        int idx = 0;
+        for (unsigned i = 0; i < 52; ++i) {
+            for (unsigned j = i+1; j < 52; ++j) {
+                if ((playerHand[0] == i && playerHand[1] == j) || 
+                    (oppHand[0] == i && oppHand[1] == j)) {
+                        opp_range[idx++] = 0.0;
+                    }
+                else {
+                    opp_range[idx++] = 1.0/1322.0;
+                }
+            }   
+        }
+
+        std::cout << "Constructing card_lookup_table" << std::endl;
+        auto card_lookup_table = construct_card_lookup();
+        std::cout << "Constructing hands_lookup_table" << std::endl;
+        auto hands_lookup_table = construct_hands_lookup(opp_range, card_lookup_table);
+        int cards2deal = 5;
+
+        std::cout << "Precomputing initial_player_hand" << std::endl;
+        // precompute initial hand
+        Hand initial_player_hand = Hand::empty();
+        for (int card : playerHand) initial_player_hand += Hand(card);
+
+        double total_won = 0.0;
+        int total_boards = 0;
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        std::cout << "Starting main loop" << std::endl;
+        for (unsigned i = 0; i < 10000; ++i) {
+            /*
+            if (i % 10000 == 0) {
+                std::cout << "Iteration " << i << std::endl;
+                double current_wp = total_won / (i + 1);  // +1 to avoid division by zero on first iteration
+                std::cout << "Current win probability: " << current_wp << std::endl;
+            }
+            */
+
+            // the board will not include opp OR player cards
+            uint64_t usedCardsMask = (1ULL << playerHand[0]) | (1ULL << playerHand[1]) | (1ULL << oppHand[0]) | (1ULL << oppHand[1]);
+
+            Hand my_hand_board = initial_player_hand;
+            Hand opp_hand_board = Hand::empty();
+
+            for(unsigned j = 0; j < 5; ++j) {
+                unsigned card;
+                uint64_t cardMask;
+                do {
+                    card = rnd(rng) + TEval::CARD_OFFSET;
+                    cardMask = 1ull << card;
+                } while (usedCardsMask & cardMask);
+                usedCardsMask |= cardMask;
+                my_hand_board += Hand(card);
+                opp_hand_board += Hand(card);
+            }
+            
+            //std::cout << "Evaluating my_hand_board" << std::endl;
+            int my_strength = mEval.evaluate(my_hand_board, 0, 0, 0, 0, 0, 0, 0);
+            double won = 0.0;
+            for (unsigned j = 0; j < opp_range.size(); ++j) {
+                double prob = opp_range[j];
+                const auto& opp_hand = hands_lookup_table[j];
+                uint64_t oppCardsMask = (1ull << opp_hand[0]) | (1ull << opp_hand[1]);
+                if (prob > 0.0 && !(oppCardsMask & usedCardsMask)) {
+                    Hand current_opp_hand = opp_hand_board;
+                    // Add opponent's cards
+                    for (int card : opp_hand) current_opp_hand += Hand(card);
+
+                    //std::cout << "Evaluating current_opp_hand" << std::endl;
+                    int opp_strength = mEval.evaluate(current_opp_hand, 0, 0, 0, 0, 0, 0, 0);
+                    if (my_strength > opp_strength) won += prob;
+                }
+            }
+
+            total_won += won;
+            ++total_boards;
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+        std::cout << "Calculating final win probability" << std::endl;
+        double wp = total_won / total_boards;
+        std::cout << "Win probability: " << wp << std::endl;
+        std::cout << "Total time taken: " << duration.count() << " milliseconds" << std::endl;
+        std::cout << "Exiting wprollout_test()" << std::endl;
+        return wp;
+    }
+
+    // wprollout eval with random hand instead of exhaustive
+    // 1.6 million x 1326 
+    // i can just cache everything and it will take up 
+    // 4.5 GB of memory at 2 bytes per entry
+    double wprollout_exhaustive(const std::array<int, 2>& playerHand, const std::array<int, 2>& oppHand)
+    {
+        omp::HandEvaluator evaluator;
+        std::cout << "Entering wprollout_test()" << std::endl;
+
+        omp::XoroShiro128Plus rng(0);
+        omp::FastUniformIntDistribution<unsigned> rnd(4, 51);
+
+        /*
+        std::cout << "Player hand: " << playerHand[0] << ", " << playerHand[1] << std::endl;
+        std::cout << "Opponent hand: " << oppHand[0] << ", " << oppHand[1] << std::endl;
+        std::cout << "Initializing opp_range" << std::endl;
+        */
+        std::array<double, 1326> opp_range;
+
+        int idx = 0;
+        for (unsigned i = 0; i < 52; ++i) {
+            for (unsigned j = i+1; j < 52; ++j) {
+                if ((playerHand[0] == i && playerHand[1] == j) || 
+                    (oppHand[0] == i && oppHand[1] == j)) {
+                        opp_range[idx++] = 0.0;
+                    }
+                else {
+                    opp_range[idx++] = 1.0/1322.0;
+                }
+            }   
+        }
+
+        auto card_lookup_table = construct_card_lookup();
+        auto hands_lookup_table = construct_hands_lookup(opp_range, card_lookup_table);
+
+        std::vector<int> remaining_cards;
+        remaining_cards.reserve(48);  // 52 - 4 cards in hands
+
+        for (int card = 0; card < 52; ++card) {
+            if (card != playerHand[0] && card != playerHand[1] &&
+                card != oppHand[0] && card != oppHand[1]) {
+                remaining_cards.push_back(card);
+            }
+        }
+
+        int cards2deal = 5;
+        std::vector<bool> v(remaining_cards.size());
+        std::fill(v.end() - cards2deal, v.end(), true);
+
+         // precompute initial hand
+        Hand initial_player_hand = Hand::empty();
+        for (int card : playerHand) initial_player_hand += Hand(card);
+
+        // Use bitset for faster card lookup
+        std::bitset<52> board_bitset;
+        
+        double total_won = 0.0;
+        int total_boards = 0;
+        
+        std::vector<int> new_board;
+        new_board.reserve(5);
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+
+        do {
+            new_board.clear();
+            /*
+            if (total_boards % 10000 == 0) {
+                double current_wp = total_won / total_boards;
+                std::cout << "Iteration " << total_boards << ", current WP: " << current_wp << std::endl;
+            }
+            */
+
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (v[i]) {
+                    new_board.push_back(remaining_cards[i]);
+                    board_bitset.set(remaining_cards[i]);
+                }
+            } 
+            
+
+            Hand my_hand_board = initial_player_hand;
+            Hand opp_hand_board = Hand::empty();
+            
+            // Initialize both hands with the board cards
+            for (int card : new_board) {
+                my_hand_board += Hand(card);
+                opp_hand_board += Hand(card);
+            }
+
+            int my_strength = evaluator.evaluate(my_hand_board);
+            
+            double won = 0.0;
+            for (size_t j = 0; j < opp_range.size(); ++j) {
+                double prob = opp_range[j];
+                const auto& opp_hand = hands_lookup_table[j];
+                
+                if (prob > 0 && 
+                    !board_bitset.test(opp_hand[0]) && !board_bitset.test(opp_hand[1])) {
+
+                    Hand current_opp_hand = opp_hand_board;
+
+                    // Add opponent's cards
+                    for (int card : opp_hand) current_opp_hand += Hand(card);
+                    
+                    int opp_strength = evaluator.evaluate(current_opp_hand);
+                    if (my_strength > opp_strength) won += prob;
+                }
+            }
+
+            total_won += won;
+            ++total_boards;
+
+            // Reset board_bitset for next iteration
+            for (size_t i = 0; i < new_board.size(); ++i) {
+                board_bitset.reset(new_board[i]);
+            }
+
+        } while (std::next_permutation(v.begin(), v.end()));
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+        std::cout << "Total time taken: " << duration.count() << " milliseconds" << std::endl;
+        std::cout << "Calculating final win probability" << std::endl;
+        double wp = total_won / total_boards;
+        std::cout << "Win probability: " << wp << std::endl;
+        std::cout << "Exiting wprollout_test()" << std::endl;
+        return wp;
+    }
+
+    static std::array<std::array<int, 2>, 1326> construct_card_lookup() {
+        std::array<std::array<int, 2>, 1326> card_lookup_table;
+        int idx = 0;
+        for (int i = 0; i < 52; ++i) {
+            for (int j = i + 1; j < 52; ++j) {
+                card_lookup_table[idx++] = {i, j};
+            }
+        }
+        return card_lookup_table;
+    }
+
+    static std::vector<std::array<int, 2>> construct_hands_lookup(const std::array<double, 1326>& opp_range, const std::array<std::array<int, 2>, 1326>& card_lookup_table) {
+        if (opp_range.size() != 1326) {
+            throw std::runtime_error("Opponent range size must be 1326");
+        }
+        std::vector<std::array<int, 2>> hands;
+        hands.reserve(opp_range.size());
+        for (size_t i = 0; i < opp_range.size(); ++i) {
+            hands.push_back(card_lookup_table[i]);
+        }
+        return hands;
+    }
+
     // Generate a vector of random hands. The random seed is deterministic on purpose.
     static vector<array<uint8_t,7>> generateRandomHands(size_t count)
     {
@@ -425,6 +725,7 @@ private:
     TEval mEval;
 };
 
+
 void benchmark()
 {
     // Benchmark only one at a time because there's some weird performance interference.
@@ -435,3 +736,11 @@ void benchmark()
     //Benchmark<Sbhs>().run();
     //Benchmark<Pse>().run();
 }
+
+/*
+int main() {
+    // Your code here
+    benchmark();
+    return 0;
+}
+*/

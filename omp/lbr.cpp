@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
-#include <bitset>  
-
+#include <bitset>
+#include <iostream>
 
 namespace omp {
 
@@ -14,7 +14,7 @@ LBR::LBR() {
 
 void LBR::construct_card_lookup() {
     int idx = 0;
-    for (int i = 0; i < 51; ++i) {
+    for (int i = 0; i < 52; ++i) {
         for (int j = i + 1; j < 52; ++j) {
             card_lookup_table[idx++] = {i, j};
         }
@@ -33,6 +33,7 @@ std::vector<std::array<int, 2>> LBR::construct_hands_lookup(const std::vector<do
     return hands;
 }
 
+// full rollout 
 double LBR::wprollout(const std::vector<int>& player_hand,
                       const std::vector<double>& opp_range,
                       const std::vector<int>& board,
@@ -126,6 +127,8 @@ double LBR::wprollout(const std::vector<int>& player_hand,
     if (total_boards == 0) {
         throw std::runtime_error("No valid boards evaluated");
     }
+
+    std::cout << "Total boards evaluated: " << total_boards << std::endl;
 
     return total_won / total_boards;
 }
