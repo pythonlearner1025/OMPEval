@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <bitset>
 
 #if OMP_BENCHMARK_3RD_PARTY
     // Include last because of all the badly named macros. I hate C programmers.
